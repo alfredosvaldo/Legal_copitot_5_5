@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Copiloto Legal: Comparador Legislativo Inteligente (OpenAI)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Export to Word -->
+  <script src="https://unpkg.com/html-docx-js/dist/html-docx.js"></script>
+  <script src="https://unpkg.com/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <!-- Diff -->
+  <script src="https://cdn.jsdelivr.net/npm/diff@5.1.0/dist/diff.min.js"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    #resultsTable th, #resultsTable td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+    #resultsTable th { background-color: #f2f2f2; text-align: left; }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%;
+              width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 2rem auto; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    ins { background-color: #d4edda; text-decoration: none; }
+    del { background-color: #f8d7da; text-decoration: line-through; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+    .modal-content { background: #fff; padding: 2rem; border-radius: .5rem; width: 420px; max-width: 90%; text-align: center; }
+    .modal-button { margin-top: 1.2rem; padding: .5rem 1.2rem; background: #2563eb; color: #fff; border-radius: .375rem; font-weight: 600; cursor: pointer; }
+    pre code { white-space: pre-wrap; }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800 flex flex-col min-h-screen">
+  <div class="container mx-auto p-4 md:p-8 flex-grow">
+    <header class="text-center mb-8">
+      <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Copiloto Legal</h1>
+      <p class="text-gray-600 mt-2">Genera indicaciones y tablas comparativas de textos legales (Chile).</p>
+    </header>
+
+    <!-- Credenciales / configuración -->
+    <div class="bg-white p-6 rounded-lg shadow-md mb-6">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="md:col-span-2">
+          <label for="apiKey" class="block text-lg font-semibold mb-2">Your OpenAI API Key</label>
+          <input type="password" id="apiKey" class="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" placeholder="Pega tu API key aquí">
+          <div class="flex items-center mt-2">
+            <input type="checkbox" id="rememberKey" class="mr-2" />
+            <label for="rememberKey" class="text-sm text-gray-600">Recordar clave en este navegador</label>
+          </div>
+          <p class="text-sm text-gray-500 mt-1">La clave se guarda sólo en tu navegador (localStorage).</p>
+        </div>
+        <div class="space-y-3">
+          <div>
+            <label for="modelSelect" class="block text-sm font-medium text-gray-700">Modelo</label>
+            <select id="modelSelect" class="w-full mt-1 p-2 border rounded-md">
+              <option value="gpt-5" selected>gpt-5</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+              <option value="gpt-4o">gpt-4o</option>
+            </select>
+          </div>
+          <div>
+            <label for="endpointSelect" class="block text-sm font-medium text-gray-700">Endpoint</label>
+            <select id="endpointSelect" class="w-full mt-1 p-2 border rounded-md">
+              <option value="responses" selected>v1/responses (recomendado)</option>
+              <option value="chat">v1/chat/completions</option>
+            </select>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="streamToggle" checked />
+            <label for="streamToggle" class="text-sm text-gray-700">Streaming (si tu org lo permite)</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Entradas -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="bg-white p-6 rounded-lg shadow-md">
+        <h2 class="text-xl font-semibold mb-4">Texto Original Completo</h2>
+        <textarea id="originalText" class="w-full h-96 p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" placeholder="Pegue aquí la columna completa del texto original..."></textarea>
+      </div>
+      <div class="bg-white p-6 rounded-lg shadow-md">
+        <h2 class="text-xl font-semibold mb-4">Texto Final Completo</h2>
+        <textarea id="finalText" class="w-full h-96 p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" placeholder="Pegue aquí la columna completa del texto final modificado..."></textarea>
+      </div>
+    </div>
+
+    <!-- Acciones -->
+    <div class="text-center my-8">
+      <button id="generateButton" class="bg-green-600 text-white font-bold py-3 px-8 rounded-lg shadow-lg hover:bg-green-700 focus:outline-none focus:ring-4 focus:ring-green-300 transition disabled:bg-gray-400 disabled:cursor-not-allowed">
+        Generar Tabla Comparativa
+      </button>
+    </div>
+
+    <!-- Salida -->
+    <div id="outputSection" class="bg-white p-6 rounded-lg shadow-md hidden">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-semibold">Resultado Comparativo
+          <span id="timerResult" class="text-sm font-normal text-gray-500 ml-2"></span>
+        </h2>
+        <button id="exportButton" class="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition">Exportar a Word</button>
+      </div>
+
+      <div class="mb-4">
+        <div class="text-xs text-gray-500 mb-1">Salida en vivo</div>
+        <pre id="streamOutput" class="w-full whitespace-pre-wrap text-sm text-gray-700 border rounded p-3 bg-gray-50"></pre>
+      </div>
+
+      <div id="resultsContainer" class="w-full overflow-x-auto"></div>
+      <div id="errorBox" class="hidden mt-4 border border-red-200 bg-red-50 text-red-700 text-sm rounded p-3"></div>
+    </div>
+  </div>
+
+  <footer class="text-center p-4 text-gray-500 text-sm">
+    <p>Copiloto Legal v5.5 (Auto-fallback) · Últ. act.: 26 Ago 2025</p>
+  </footer>
+
+  <!-- Modal -->
+  <div id="customAlert" class="modal-backdrop hidden">
+    <div class="modal-content">
+      <p id="alertMessage"></p>
+      <button id="alertCloseButton" class="modal-button">Cerrar</button>
+    </div>
+  </div>
+
+<script>
+/* ========= Persistencia clave ========= */
+const apiKeyInput = document.getElementById('apiKey');
+const rememberKey  = document.getElementById('rememberKey');
+if (localStorage.getItem('openai_api_key')) {
+  apiKeyInput.value = localStorage.getItem('openai_api_key');
+  rememberKey.checked = true;
+}
+rememberKey.addEventListener('change',()=>{ if(!rememberKey.checked) localStorage.removeItem('openai_api_key'); });
+
+/* ========= UI ========= */
+document.getElementById('generateButton').addEventListener('click', generateIndications);
+document.getElementById('exportButton').addEventListener('click', exportToWord);
+document.getElementById('alertCloseButton').addEventListener('click',()=>{ document.getElementById('customAlert').classList.add('hidden'); });
+
+function showAlert(m){ document.getElementById('alertMessage').textContent=m; document.getElementById('customAlert').classList.remove('hidden'); }
+function showErrorBox(obj){ const box=document.getElementById('errorBox'); box.classList.remove('hidden'); box.innerHTML=`<pre>${typeof obj==='string'?obj:JSON.stringify(obj,null,2)}</pre>`; }
+
+/* ========= Parser & Renderer ========= */
+function parseCustomFormat(t){ const out=[]; for(const b of t.split('<ARTICLE_END>')){ if(!b.trim()) continue;
+  const o=b.match(/<ORIGINAL>([\s\S]*?)<\/ORIGINAL>/), i=b.match(/<INDICACIONES>([\s\S]*?)<\/INDICACIONES>/), f=b.match(/<FINAL>([\s\S]*?)<\/FINAL>/);
+  if(o&&i&&f) out.push({textoOriginal:o[1].trim(),indicaciones:i[1].trim(),textoFinal:f[1].trim()});
+} return out; }
+function renderTable(arts){ const c=document.getElementById('resultsContainer'); c.innerHTML='';
+  if(!arts.length){ c.innerHTML='<p class="text-red-500">No se pudieron procesar artículos.</p>'; return; }
+  const tbl=document.createElement('table'); tbl.id='resultsTable'; tbl.className='w-full border-collapse';
+  tbl.innerHTML='<thead><tr><th class="p-2 border bg-gray-100">Texto Original (con cambios)</th><th class="p-2 border bg-gray-100">Indicaciones Generadas</th><th class="p-2 border bg-gray-100">Texto Final (con cambios)</th></tr></thead>';
+  const tb=document.createElement('tbody');
+  arts.forEach(a=>{ const d=Diff.diffWords(a.textoOriginal||'',a.textoFinal||'',{ignoreWhitespace:true}); let oh='',fh=''; d.forEach(p=>{const v=p.value.replace(/</g,"&lt;").replace(/>/g,"&gt;"); if(p.added) fh+=`<ins>${v}</ins>`; else if(p.removed) oh+=`<del>${v}</del>`; else {oh+=v; fh+=v;}}); 
+    tb.innerHTML+=`<tr><td class="p-2 border align-top whitespace-pre-wrap">${oh}</td><td class="p-2 border align-top whitespace-pre-wrap">${(a.indicaciones||'').replace(/\n/g,'<br>')}</td><td class="p-2 border align-top whitespace-pre-wrap">${fh}</td></tr>`;
+  }); tbl.appendChild(tb); c.appendChild(tbl); document.getElementById('outputSection').classList.remove('hidden'); }
+
+/* ========= SSE readers ========= */
+async function readSSE_Responses(res,onDelta){ if(!res.ok){let e;try{e=await res.json()}catch{e=await res.text()} throw{httpStatus:res.status,error:e};}
+  const r=res.body.getReader(), dec=new TextDecoder(); let buf=''; for(;;){const {done,value}=await r.read(); if(done)break; buf+=dec.decode(value,{stream:true}); const lines=buf.split('\n'); buf=lines.pop()||''; for(const raw of lines){ if(!raw.startsWith('data:'))continue; const data=raw.slice(5).trim(); if(data==='[DONE]')return; try{const o=JSON.parse(data);
+      if(o.type==='response.output_text.delta' && typeof o.delta==='string') onDelta(o.delta);
+      else if(o.type==='response.delta'){ const t=o.delta?.output_text||o.delta?.text||''; if(t) onDelta(t); }
+      else if(o.type==='message.delta'){ const t=o.delta?.content?.map(c=>c?.text||'').join('')||''; if(t) onDelta(t); }
+    }catch{}}}}
+async function readSSE_Chat(res,onDelta){ if(!res.ok){let e;try{e=await res.json()}catch{e=await res.text()} throw{httpStatus:res.status,error:e};}
+  const r=res.body.getReader(), dec=new TextDecoder(); let buf=''; for(;;){const {done,value}=await r.read(); if(done)break; buf+=dec.decode(value,{stream:true}); const lines=buf.split('\n'); buf=lines.pop()||''; for(const raw of lines){ if(!raw.startsWith('data:'))continue; const data=raw.slice(5).trim(); if(data==='[DONE]')return; try{const o=JSON.parse(data); const d=o?.choices?.[0]?.delta?.content; if(typeof d==='string') onDelta(d);}catch{}}}}
+
+/* ========= PROBE streaming (cache por sesión) ========= */
+async function probeStreaming({apiKey, endpoint, model}){
+  const key=`probe:${endpoint}:${model}`;
+  const cached=sessionStorage.getItem(key);
+  if(cached==='ok') return true;
+  if(cached==='no') return false;
+
+  try{
+    if(endpoint==='responses'){
+      const res=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,input:'ping',stream:true})});
+      if(!res.ok){ const j=await res.json().catch(()=>({})); if(j?.error?.param==='stream'){ sessionStorage.setItem(key,'no'); return false; } throw j; }
+      // si llega primer chunk, ya sabemos que hay stream
+      const r=res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
+      sessionStorage.setItem(key,'ok'); return true;
+    }else{
+      const res=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,messages:[{role:'user',content:'ping'}],stream:true})});
+      if(!res.ok){ const j=await res.json().catch(()=>({})); if(j?.error?.param==='stream'){ sessionStorage.setItem(key,'no'); return false; } throw j; }
+      const r=res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
+      sessionStorage.setItem(key,'ok'); return true;
+    }
+  }catch(_){ sessionStorage.setItem(key,'no'); return false; }
+}
+
+/* ========= Cliente OpenAI (orden mejorado + cache de fallos) ========= */
+async function generateIndications(){
+  const apiKey = apiKeyInput.value;
+  let modelSel = document.getElementById('modelSelect')?.value || 'gpt-4.1';
+  let endpointSel = document.getElementById('endpointSelect')?.value || 'responses';
+  let wantStreaming = document.getElementById('streamToggle')?.checked ?? true;
+
+  const orig = document.getElementById('originalText').value;
+  const fin  = document.getElementById('finalText').value;
+  if(!apiKey) return showAlert('Ingresa tu API key.');
+  if(!orig.trim() || !fin.trim()) return showAlert('Pega texto en ambas columnas.');
+  if(rememberKey.checked) localStorage.setItem('openai_api_key', apiKey);
+
+  const resBox = document.getElementById('resultsContainer');
+  const outSec = document.getElementById('outputSection');
+  const btn    = document.getElementById('generateButton');
+  const timer  = document.getElementById('timerResult');
+  const out    = document.getElementById('streamOutput');
+  const errBox = document.getElementById('errorBox');
+
+  errBox.classList.add('hidden');
+  btn.disabled=true; btn.textContent='Generando...';
+  outSec.classList.remove('hidden'); resBox.innerHTML='<div class="loader"></div>'; out.textContent=''; timer.textContent='';
+
+  const t0=performance.now(); const iv=setInterval(()=>{ timer.textContent=`Generando… ${((performance.now()-t0)/1000).toFixed(1)}s`; },250);
+
+  /* ——— PROMPT ÍNTEGRO ——— */
+  const prompt = `Rol: Eres un asesor legislativo experto en Chile, con especialización en técnica parlamentaria. Tu misión es generar una comparación completa, artículo por artículo, de dos textos legales, produciendo indicaciones precisas y profesionales que se adhieran estrictamente a la terminología oficial.
+
+1) GLOSARIO DE TÉRMINOS (USO OBLIGATORIO)
+- Verbos de acción (normativos):
+• Para adicionar información: "Incorpórase", "Agrégase", "Añádese".
+• Para sustituir información: "Sustitúyese", "Reemplázase".
+• Para adicionar entre vocablos: "Intercálese".
+• Para eliminar información: "Suprímese", "Elimínase".
+• Para modificar de forma genérica: "Modifícase".
+- Sustantivos para designar elementos: "el guarismo", "la expresión", "la palabra", "la frase", "la oración", "el numeral", "el literal", "el inciso", "el artículo", "el encabezado", "la sección (i), (ii), (iii)…".
+- Meta-frase para iniciar cada indicación numerada (nivel principal): "Para + infinitivo" (ej.: Para reemplazar…, Para modificar…, Para agregar…). En los desgloses a), b), c) usa solo los verbos normativos del glosario.
+
+2) REGLAS DE ORO (MÁXIMA PRIORIDAD)
+- Numeración correlativa global: la secuencia 1), 2), 3)… es continua a lo largo de TODO el documento (no se reinicia por artículo).
+- Procesar todo y en orden: recorre los textos de principio a fin y genera un bloque para CADA artículo.
+- Encabezado único por artículo (obligatorio): Dentro de <INDICACIONES>, escribe una sola vez la línea: AL ARTÍCULO [nombre completo] (sin dos puntos al final) y debajo coloca todas las indicaciones numeradas aplicables a ese artículo. "Nombre completo" = denominación exacta (p. ej., "Artículo 11", "Artículo tercero transitorio", ordinales/letras/romanos y/o epígrafe).
+- Agrupación de cambios:
+• Genera UNA indicación por unidad afectada (inciso, numeral, literal, sección, encabezado, “nuevo inciso [ordinal] introducido al artículo X”, etc.).
+• Si varios cambios coherentes afectan una MISMA unidad (o varias partes del mismo artículo bajo un objetivo común), puedes agruparlos en UNA sola indicación usando la frase: "en el siguiente sentido:" y desglosando con a), b), c)… (usando verbos normativos).
+
+3) FORMATO DE SALIDA ESTRICTO (OBLIGATORIO)
+Toda la respuesta debe usar estas etiquetas (no uses JSON).
+<ARTICLE_START>
+<ORIGINAL>...texto original aquí (si aplica)...</ORIGINAL>
+<INDICACIONES>
+AL ARTÍCULO [nombre completo]
+1) Para [verbo en infinitivo] ...
+2) Para [verbo en infinitivo] ...
+a) [Verbo normativo] ...
+b) [Verbo normativo] ...
+3) Para [verbo en infinitivo] ...
+</INDICACIONES>
+<FINAL>...texto final aquí (si aplica)...</FINAL>
+<ARTICLE_END>
+... (repetir para cada artículo) ...
+
+Si no hay cambios para un artículo, deja <INDICACIONES> vacío (sin encabezado ni numerales).
+
+4) PROCESO DE ANÁLISIS SECUENCIAL E ITERATIVO
+Paso 1 — Identificar artículo: toma el siguiente en secuencia (p. ej., "Artículo 2°", "Artículo tercero transitorio").
+Paso 2 — Determinar el caso:
+CASO A: MODIFICACIÓN (existe en ambos textos con el mismo número)
+- Regla de agrupación:
+• Una indicación por unidad afectada (inciso, numeral, literal, sección, encabezado…).
+• Si hay múltiples cambios en la MISMA unidad, usa: N) Para modificar [la unidad] en el siguiente sentido: a) [Verbo normativo] ... b) [Verbo normativo] ...
+- Plantillas:
+• N) Para reemplazar en el [inciso/numeral/literal/sección (ii)] [del artículo X], el guarismo "___" por "___".
+• N) Para agregar, en el [inciso/numeral/literal], a continuación de "___", la frase "___".
+• N) Para modificar [inciso primero] en el siguiente sentido: a) Suprímese la expresión "___". b) Incorpórase, entre "___" y "___", la frase "___".
+CASO B: ARTÍCULO NUEVO (solo en el Texto Final)
+- <ORIGINAL> vacío.
+- <INDICACIONES>: AL ARTÍCULO [nombre completo] N) Para agregar el siguiente artículo [nombre completo], nuevo, del siguiente tenor: "___".
+- <FINAL> contiene el texto completo nuevo.
+CASO C: ARTÍCULO ELIMINADO (solo en el Texto Original)
+- <ORIGINAL> contiene el texto del artículo.
+- <INDICACIONES>: AL ARTÍCULO [nombre completo] N) Para suprimir el artículo [nombre completo].
+- <FINAL> vacío.
+CASO D: RENUMERACIÓN (contenido del "Artículo X" original es idéntico al del "Artículo Y" final)
+- <ORIGINAL> contiene el texto del artículo X.
+- <INDICACIONES>: AL ARTÍCULO [nombre completo del original X] N) Para consignar que el artículo X ha pasado a ser artículo Y.
+- <FINAL> contiene el texto del artículo Y.
+Paso 3 — Construir bloque de salida: encierra cada resultado en <ARTICLE_START> … <ARTICLE_END>.
+Paso 4 — Continuar: al cerrar <ARTICLE_END>, procesa de inmediato el siguiente artículo.
+
+5) REGLA FINAL DE COMPLETITUD
+No te detengas hasta procesar TODOS los artículos del Texto Original y del Texto Final. Continúa generando bloques <ARTICLE_START>…<ARTICLE_END> hasta cubrir ambos completamente.
+
+6) TEXTOS A PROCESAR
+Texto Original: ${orig}
+Texto Final: ${fin}`;
+
+  try {
+    const txt = await autoCall({ apiKey, modelSel, endpointSel, wantStreaming, prompt, out: out });
+    renderTable(parseCustomFormat(txt));
+  } catch (e) {
+    showErrorBox(e);
+    document.getElementById('resultsContainer').innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
+  } finally {
+    clearInterval(iv);
+    const s=((performance.now()-t0)/1000).toFixed(2);
+    timer.textContent=`Generado en ${s}s`;
+    btn.disabled=false; btn.textContent='Generar Tabla Comparativa';
+  }
+}
+
+/* ========= Orden inteligente + cache fallos y stream ========= */
+async function autoCall({ apiKey, modelSel, endpointSel, wantStreaming, prompt, out }){
+// prioridad nueva: respeta lo que el usuario eligió primero
+const models = Array.from(new Set([ modelSel, 'gpt-4.1', 'gpt-4o' ]));
+const endpoints = Array.from(new Set([ endpointSel, 'responses', 'chat' ]));
+
+  const triedKey = (e,m)=>`bad:${e}:${m}`;
+  for(const e of endpoints){
+    for(const m of models){
+      if(sessionStorage.getItem(triedKey(e,m))==='bad') continue;
+
+      // si pidieron streaming, primero probamos si está habilitado para e+m
+      let doStream = wantStreaming;
+      if(doStream){
+        const ok = await probeStreaming({ apiKey, endpoint:e, model:m });
+        if(!ok){ out.textContent += `\n[Streaming no habilitado para ${e}+${m}. Usaremos no-stream]\n`; doStream=false; }
+      }
+
+      out.textContent += `\n→ Probando ${e} con ${m}${doStream?' [stream]':''}...\n`;
+      try{
+        const text = await callOnce({ apiKey, endpoint:e, model:m, stream:doStream, prompt, outEl:out });
+        out.textContent += `\n✓ OK con ${e} + ${m}${doStream?' [stream]':''}\n`;
+        return text;
+      }catch(err){
+        sessionStorage.setItem(triedKey(e,m),'bad');
+        out.textContent += `✖ Error ${err?.httpStatus||''}. Seguimos probando...\n`;
+      }
+    }
+  }
+  throw { error:'No hubo combinación válida. Revisa permisos del modelo o usa gpt-4.1 / gpt-4o.' };
+}
+
+/* ========= Llamada única ========= */
+async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl }){
+  const headers={ 'Content-Type':'application/json','Authorization':`Bearer ${apiKey}` };
+
+  if(endpoint==='responses'){
+    const url='https://api.openai.com/v1/responses';
+    if(stream){
+      const body={ model, input: prompt, stream: true };
+      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+      if(!res.ok){ let err; try{err=await res.json()}catch{err=await res.text()} throw {httpStatus:res.status,error:err,sent:body}; }
+      let full=''; await readSSE_Responses(res,(d)=>{ full+=d; outEl.textContent+=d; }); return full;
+    }else{
+      const body={ model, input: prompt };
+      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+      const j=await res.json().catch(()=>({})); if(!res.ok) throw {httpStatus:res.status,error:j,sent:body};
+      const text=(typeof j.output_text==='string')?j.output_text:(Array.isArray(j.output)?j.output.map(m=>(m.content||[]).map(c=>c.text||'').join('')).join(''):''); 
+      return text||'';
+    }
+  }else{ // chat/completions
+    const url='https://api.openai.com/v1/chat/completions';
+    if(stream){
+      const body={ model, messages:[{role:'user',content:prompt}], stream:true };
+      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+      if(!res.ok){ let err; try{err=await res.json()}catch{err=await res.text()} throw {httpStatus:res.status,error:err,sent:body}; }
+      let full=''; await readSSE_Chat(res,(d)=>{ full+=d; outEl.textContent+=d; }); return full;
+    }else{
+      const body={ model, messages:[{role:'user',content:prompt}] };
+      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
+      const j=await res.json().catch(()=>({})); if(!res.ok) throw {httpStatus:res.status,error:j,sent:body};
+      return j?.choices?.[0]?.message?.content || '';
+    }
+  }
+}
+
+/* ========= Export ========= */
+function exportToWord(){
+  const t=document.getElementById('resultsTable'); if(!t) return showAlert('No hay resultados para exportar.');
+  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+    body{font-family:'Times New Roman',Times,serif;} table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #000;padding:8px;vertical-align:top;white-space:pre-wrap} th{background:#f2f2f2}
+    ins{background:#d4edda;color:#000;text-decoration:none} del{background:#f8d7da;color:#000;text-decoration:line-through}
+  </style></head><body><h1>Tabla Comparativa de Indicaciones</h1>${t.outerHTML}</body></html>`;
+  saveAs(htmlDocx.asBlob(html),'Tabla_Comparativa_Indicaciones.docx');
+}
+</script>
+
+</body>
+</html>
