@@ -49,7 +49,9 @@
           <div>
             <label for="modelSelect" class="block text-sm font-medium text-gray-700">Modelo</label>
             <select id="modelSelect" class="w-full mt-1 p-2 border rounded-md">
-              <option value="gpt-5" selected>gpt-5</option>
+              <option value="gpt-5" selected>gpt-5 (standard)</option>
+              <option value="gpt-5-reasoning">gpt-5 (reasoning)</option>
+              <option value="gpt-5-mini">gpt-5-mini (rápido)</option>
               <option value="gpt-4.1">gpt-4.1</option>
               <option value="gpt-4o">gpt-4o</option>
             </select>
@@ -60,6 +62,7 @@
               <option value="responses" selected>v1/responses (recomendado)</option>
               <option value="chat">v1/chat/completions</option>
             </select>
+            <p class="text-xs text-gray-500 mt-1">Sugerido automáticamente por modelo (puedes cambiarlo).</p>
           </div>
           <div class="flex items-center gap-2">
             <input type="checkbox" id="streamToggle" checked />
@@ -108,7 +111,7 @@
   </div>
 
   <footer class="text-center p-4 text-gray-500 text-sm">
-    <p>Copiloto Legal v5.5 (Auto-fallback) · Últ. act.: 26 Ago 2025</p>
+    <p>Copiloto Legal v5.6 (GPT-5 options + auto endpoint) · Últ. act.: 26 Ago 2025</p>
   </footer>
 
   <!-- Modal -->
@@ -120,97 +123,240 @@
   </div>
 
 <script>
-/* ========= Persistencia clave ========= */
+/* ============ Modelo ↔ Endpoint sugerido ============ */
+const MODEL_PRESETS = {
+  'gpt-5':             { id: 'gpt-5',             preferredEndpoint: 'responses' },
+  'gpt-5-reasoning':   { id: 'gpt-5-reasoning',   preferredEndpoint: 'responses' },
+  'gpt-5-mini':        { id: 'gpt-5-mini',        preferredEndpoint: 'responses' },
+  'gpt-4.1':           { id: 'gpt-4.1',           preferredEndpoint: 'chat' },
+  'gpt-4o':            { id: 'gpt-4o',            preferredEndpoint: 'chat' }
+};
+
+const modelSelect = document.getElementById('modelSelect');
+const endpointSelect = document.getElementById('endpointSelect');
+let endpointUserEdited = false;
+endpointSelect.addEventListener('change', () => { endpointUserEdited = true; });
+modelSelect.addEventListener('change', () => {
+  const key = modelSelect.value;
+  const preferred = MODEL_PRESETS[key]?.preferredEndpoint;
+  if (!endpointUserEdited && preferred) endpointSelect.value = preferred;
+  sessionStorage.clear(); // limpia cache de errores/plataforma por sesión
+});
+
+/* ============ Persistencia de API key ============ */
 const apiKeyInput = document.getElementById('apiKey');
 const rememberKey  = document.getElementById('rememberKey');
 if (localStorage.getItem('openai_api_key')) {
   apiKeyInput.value = localStorage.getItem('openai_api_key');
   rememberKey.checked = true;
 }
-rememberKey.addEventListener('change',()=>{ if(!rememberKey.checked) localStorage.removeItem('openai_api_key'); });
+rememberKey.addEventListener('change', ()=>{ if(!rememberKey.checked) localStorage.removeItem('openai_api_key'); });
 
-/* ========= UI ========= */
+/* ============ UI helpers ============ */
 document.getElementById('generateButton').addEventListener('click', generateIndications);
 document.getElementById('exportButton').addEventListener('click', exportToWord);
 document.getElementById('alertCloseButton').addEventListener('click',()=>{ document.getElementById('customAlert').classList.add('hidden'); });
 
-function showAlert(m){ document.getElementById('alertMessage').textContent=m; document.getElementById('customAlert').classList.remove('hidden'); }
-function showErrorBox(obj){ const box=document.getElementById('errorBox'); box.classList.remove('hidden'); box.innerHTML=`<pre>${typeof obj==='string'?obj:JSON.stringify(obj,null,2)}</pre>`; }
-
-/* ========= Parser & Renderer ========= */
-function parseCustomFormat(t){ const out=[]; for(const b of t.split('<ARTICLE_END>')){ if(!b.trim()) continue;
-  const o=b.match(/<ORIGINAL>([\s\S]*?)<\/ORIGINAL>/), i=b.match(/<INDICACIONES>([\s\S]*?)<\/INDICACIONES>/), f=b.match(/<FINAL>([\s\S]*?)<\/FINAL>/);
-  if(o&&i&&f) out.push({textoOriginal:o[1].trim(),indicaciones:i[1].trim(),textoFinal:f[1].trim()});
-} return out; }
-function renderTable(arts){ const c=document.getElementById('resultsContainer'); c.innerHTML='';
-  if(!arts.length){ c.innerHTML='<p class="text-red-500">No se pudieron procesar artículos.</p>'; return; }
-  const tbl=document.createElement('table'); tbl.id='resultsTable'; tbl.className='w-full border-collapse';
-  tbl.innerHTML='<thead><tr><th class="p-2 border bg-gray-100">Texto Original (con cambios)</th><th class="p-2 border bg-gray-100">Indicaciones Generadas</th><th class="p-2 border bg-gray-100">Texto Final (con cambios)</th></tr></thead>';
-  const tb=document.createElement('tbody');
-  arts.forEach(a=>{ const d=Diff.diffWords(a.textoOriginal||'',a.textoFinal||'',{ignoreWhitespace:true}); let oh='',fh=''; d.forEach(p=>{const v=p.value.replace(/</g,"&lt;").replace(/>/g,"&gt;"); if(p.added) fh+=`<ins>${v}</ins>`; else if(p.removed) oh+=`<del>${v}</del>`; else {oh+=v; fh+=v;}}); 
-    tb.innerHTML+=`<tr><td class="p-2 border align-top whitespace-pre-wrap">${oh}</td><td class="p-2 border align-top whitespace-pre-wrap">${(a.indicaciones||'').replace(/\n/g,'<br>')}</td><td class="p-2 border align-top whitespace-pre-wrap">${fh}</td></tr>`;
-  }); tbl.appendChild(tb); c.appendChild(tbl); document.getElementById('outputSection').classList.remove('hidden'); }
-
-/* ========= SSE readers ========= */
-async function readSSE_Responses(res,onDelta){ if(!res.ok){let e;try{e=await res.json()}catch{e=await res.text()} throw{httpStatus:res.status,error:e};}
-  const r=res.body.getReader(), dec=new TextDecoder(); let buf=''; for(;;){const {done,value}=await r.read(); if(done)break; buf+=dec.decode(value,{stream:true}); const lines=buf.split('\n'); buf=lines.pop()||''; for(const raw of lines){ if(!raw.startsWith('data:'))continue; const data=raw.slice(5).trim(); if(data==='[DONE]')return; try{const o=JSON.parse(data);
-      if(o.type==='response.output_text.delta' && typeof o.delta==='string') onDelta(o.delta);
-      else if(o.type==='response.delta'){ const t=o.delta?.output_text||o.delta?.text||''; if(t) onDelta(t); }
-      else if(o.type==='message.delta'){ const t=o.delta?.content?.map(c=>c?.text||'').join('')||''; if(t) onDelta(t); }
-    }catch{}}}}
-async function readSSE_Chat(res,onDelta){ if(!res.ok){let e;try{e=await res.json()}catch{e=await res.text()} throw{httpStatus:res.status,error:e};}
-  const r=res.body.getReader(), dec=new TextDecoder(); let buf=''; for(;;){const {done,value}=await r.read(); if(done)break; buf+=dec.decode(value,{stream:true}); const lines=buf.split('\n'); buf=lines.pop()||''; for(const raw of lines){ if(!raw.startsWith('data:'))continue; const data=raw.slice(5).trim(); if(data==='[DONE]')return; try{const o=JSON.parse(data); const d=o?.choices?.[0]?.delta?.content; if(typeof d==='string') onDelta(d);}catch{}}}}
-
-/* ========= PROBE streaming (cache por sesión) ========= */
-async function probeStreaming({apiKey, endpoint, model}){
-  const key=`probe:${endpoint}:${model}`;
-  const cached=sessionStorage.getItem(key);
-  if(cached==='ok') return true;
-  if(cached==='no') return false;
-
-  try{
-    if(endpoint==='responses'){
-      const res=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,input:'ping',stream:true})});
-      if(!res.ok){ const j=await res.json().catch(()=>({})); if(j?.error?.param==='stream'){ sessionStorage.setItem(key,'no'); return false; } throw j; }
-      // si llega primer chunk, ya sabemos que hay stream
-      const r=res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
-      sessionStorage.setItem(key,'ok'); return true;
-    }else{
-      const res=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${apiKey}`},body:JSON.stringify({model,messages:[{role:'user',content:'ping'}],stream:true})});
-      if(!res.ok){ const j=await res.json().catch(()=>({})); if(j?.error?.param==='stream'){ sessionStorage.setItem(key,'no'); return false; } throw j; }
-      const r=res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
-      sessionStorage.setItem(key,'ok'); return true;
-    }
-  }catch(_){ sessionStorage.setItem(key,'no'); return false; }
+function showAlert(m){ document.getElementById('alertMessage').textContent = m; document.getElementById('customAlert').classList.remove('hidden'); }
+function showErrorBox(obj){
+  const box = document.getElementById('errorBox');
+  box.classList.remove('hidden');
+  box.innerHTML = `<pre>${typeof obj==='string' ? obj : JSON.stringify(obj, null, 2)}</pre>`;
 }
 
-/* ========= Cliente OpenAI (orden mejorado + cache de fallos) ========= */
-async function generateIndications(){
+/* ============ Parser & Renderer ============ */
+function parseCustomFormat(responseText) {
+  const articles = [];
+  const blocks = responseText.split('<ARTICLE_END>');
+  for (const b of blocks) {
+    if (!b.trim()) continue;
+    const o = b.match(/<ORIGINAL>([\s\S]*?)<\/ORIGINAL>/);
+    const i = b.match(/<INDICACIONES>([\s\S]*?)<\/INDICACIONES>/);
+    const f = b.match(/<FINAL>([\s\S]*?)<\/FINAL>/);
+    if (o && i && f) {
+      articles.push({
+        textoOriginal: (o[1] || '').trim(),
+        indicaciones:  (i[1] || '').trim(),
+        textoFinal:    (f[1] || '').trim()
+      });
+    }
+  }
+  return articles;
+}
+
+function renderTable(articles) {
+  const container = document.getElementById('resultsContainer');
+  container.innerHTML = '';
+  if (!articles.length) {
+    container.innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
+    return;
+  }
+  const table = document.createElement('table');
+  table.id = 'resultsTable';
+  table.className = 'w-full border-collapse';
+  table.innerHTML = '<thead><tr>' +
+    '<th class="w-1/3 p-2 border bg-gray-100">Texto Original (con cambios)</th>' +
+    '<th class="w-1/3 p-2 border bg-gray-100">Indicaciones Generadas</th>' +
+    '<th class="w-1/3 p-2 border bg-gray-100">Texto Final (con cambios)</th>' +
+  '</tr></thead>';
+  const tbody = document.createElement('tbody');
+
+  articles.forEach(a => {
+    const diff = Diff.diffWords(a.textoOriginal || '', a.textoFinal || '', { ignoreWhitespace: true });
+    let originalHtml = '', finalHtml = '';
+    diff.forEach(part => {
+      const v = part.value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      if (part.added)      finalHtml   += `<ins>${v}</ins>`;
+      else if (part.removed) originalHtml += `<del>${v}</del>`;
+      else { originalHtml += v; finalHtml += v; }
+    });
+    tbody.innerHTML += `
+      <tr>
+        <td class="p-2 border align-top whitespace-pre-wrap">${originalHtml}</td>
+        <td class="p-2 border align-top whitespace-pre-wrap">${(a.indicaciones||'').replace(/\n/g,'<br>')}</td>
+        <td class="p-2 border align-top whitespace-pre-wrap">${finalHtml}</td>
+      </tr>`;
+  });
+
+  table.appendChild(tbody);
+  container.appendChild(table);
+  document.getElementById('outputSection').classList.remove('hidden');
+}
+
+/* ============ SSE readers ============ */
+async function readSSE_Responses(response, onDelta) {
+  if (!response.ok) { let e; try{ e = await response.json(); } catch { e = await response.text(); } throw { httpStatus: response.status, error: e }; }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const raw of lines) {
+      if (!raw.startsWith('data:')) continue;
+      const data = raw.slice(5).trim();
+      if (data === '[DONE]') return;
+      try {
+        const obj = JSON.parse(data);
+        if (obj.type === 'response.output_text.delta' && typeof obj.delta === 'string') onDelta(obj.delta);
+        else if (obj.type === 'response.delta') {
+          const t = obj.delta?.output_text || obj.delta?.text || '';
+          if (t) onDelta(t);
+        } else if (obj.type === 'message.delta') {
+          const t = obj.delta?.content?.map(c => c?.text || '').join('') || '';
+          if (t) onDelta(t);
+        }
+      } catch {}
+    }
+  }
+}
+async function readSSE_Chat(response, onDelta) {
+  if (!response.ok) { let e; try{ e = await response.json(); } catch { e = await response.text(); } throw { httpStatus: response.status, error: e }; }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const raw of lines) {
+      if (!raw.startsWith('data:')) continue;
+      const data = raw.slice(5).trim();
+      if (data === '[DONE]') return;
+      try {
+        const obj = JSON.parse(data);
+        const delta = obj?.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string') onDelta(delta);
+      } catch {}
+    }
+  }
+}
+
+/* ============ Probe de streaming por sesión ============ */
+async function probeStreaming({ apiKey, endpoint, model }) {
+  const key = `probe:${endpoint}:${model}`;
+  const cached = sessionStorage.getItem(key);
+  if (cached === 'ok') return true;
+  if (cached === 'no') return false;
+
+  try {
+    if (endpoint === 'responses') {
+      const res = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, input: 'ping', stream: true })
+      });
+      if (!res.ok) {
+        let j = {}; try { j = await res.json(); } catch {}
+        if (j?.error?.param === 'stream') { sessionStorage.setItem(key, 'no'); return false; }
+        throw j;
+      }
+      const r = res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
+      sessionStorage.setItem(key, 'ok'); return true;
+    } else {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], stream: true })
+      });
+      if (!res.ok) {
+        let j = {}; try { j = await res.json(); } catch {}
+        if (j?.error?.param === 'stream') { sessionStorage.setItem(key, 'no'); return false; }
+        throw j;
+      }
+      const r = res.body.getReader(); await r.read(); r.cancel().catch(()=>{});
+      sessionStorage.setItem(key, 'ok'); return true;
+    }
+  } catch (_) {
+    sessionStorage.setItem(key, 'no');
+    return false;
+  }
+}
+
+/* ============ Motor de llamadas con fallback (respeta tu elección) ============ */
+async function generateIndications() {
   const apiKey = apiKeyInput.value;
-  let modelSel = document.getElementById('modelSelect')?.value || 'gpt-4.1';
-  let endpointSel = document.getElementById('endpointSelect')?.value || 'responses';
-  let wantStreaming = document.getElementById('streamToggle')?.checked ?? true;
+  const modelKey = modelSelect.value;
+  const selectedModelId = MODEL_PRESETS[modelKey]?.id || modelKey;
 
-  const orig = document.getElementById('originalText').value;
-  const fin  = document.getElementById('finalText').value;
-  if(!apiKey) return showAlert('Ingresa tu API key.');
-  if(!orig.trim() || !fin.trim()) return showAlert('Pega texto en ambas columnas.');
-  if(rememberKey.checked) localStorage.setItem('openai_api_key', apiKey);
+  // endpoint elegido o sugerido por modelo
+  const selectedEndpoint = endpointSelect.value || MODEL_PRESETS[modelKey]?.preferredEndpoint || 'responses';
+  const wantStreaming = document.getElementById('streamToggle')?.checked ?? true;
 
-  const resBox = document.getElementById('resultsContainer');
-  const outSec = document.getElementById('outputSection');
-  const btn    = document.getElementById('generateButton');
-  const timer  = document.getElementById('timerResult');
-  const out    = document.getElementById('streamOutput');
-  const errBox = document.getElementById('errorBox');
+  const originalText = document.getElementById('originalText').value;
+  const finalText    = document.getElementById('finalText').value;
 
-  errBox.classList.add('hidden');
-  btn.disabled=true; btn.textContent='Generando...';
-  outSec.classList.remove('hidden'); resBox.innerHTML='<div class="loader"></div>'; out.textContent=''; timer.textContent='';
+  if (!apiKey) return showAlert('Ingresa tu API key.');
+  if (!originalText.trim() || !finalText.trim()) return showAlert('Pega texto en ambas columnas.');
+  if (rememberKey.checked) localStorage.setItem('openai_api_key', apiKey);
 
-  const t0=performance.now(); const iv=setInterval(()=>{ timer.textContent=`Generando… ${((performance.now()-t0)/1000).toFixed(1)}s`; },250);
+  const resultsContainer = document.getElementById('resultsContainer');
+  const outputSection    = document.getElementById('outputSection');
+  const generateButton   = document.getElementById('generateButton');
+  const timerResult      = document.getElementById('timerResult');
+  const streamOutput     = document.getElementById('streamOutput');
+  const errorBox         = document.getElementById('errorBox');
 
-  /* ——— PROMPT ÍNTEGRO ——— */
+  errorBox.classList.add('hidden');
+  generateButton.disabled = true;
+  generateButton.textContent = 'Generando...';
+  outputSection.classList.remove('hidden');
+  resultsContainer.innerHTML = '<div class="loader"></div>';
+  streamOutput.textContent = '';
+  timerResult.textContent = '';
+
+  const startTime = performance.now();
+  const timer = setInterval(() => {
+    const sec = ((performance.now() - startTime) / 1000).toFixed(1);
+    timerResult.textContent = `Generando… ${sec}s`;
+  }, 250);
+
+  // PROMPT ÍNTEGRO (sin resumir)
   const prompt = `Rol: Eres un asesor legislativo experto en Chile, con especialización en técnica parlamentaria. Tu misión es generar una comparación completa, artículo por artículo, de dos textos legales, produciendo indicaciones precisas y profesionales que se adhieran estrictamente a la terminología oficial.
 
 1) GLOSARIO DE TÉRMINOS (USO OBLIGATORIO)
@@ -279,100 +425,121 @@ Paso 4 — Continuar: al cerrar <ARTICLE_END>, procesa de inmediato el siguiente
 No te detengas hasta procesar TODOS los artículos del Texto Original y del Texto Final. Continúa generando bloques <ARTICLE_START>…<ARTICLE_END> hasta cubrir ambos completamente.
 
 6) TEXTOS A PROCESAR
-Texto Original: ${orig}
-Texto Final: ${fin}`;
+Texto Original: ${originalText}
+Texto Final: ${finalText}`;
 
   try {
-    const txt = await autoCall({ apiKey, modelSel, endpointSel, wantStreaming, prompt, out: out });
-    renderTable(parseCustomFormat(txt));
-  } catch (e) {
-    showErrorBox(e);
+    const text = await autoCall({
+      apiKey,
+      // prioridad: lo que eligió la persona primero
+      models:    [ selectedModelId, 'gpt-4.1', 'gpt-4o' ],
+      endpoints: [ selectedEndpoint, (selectedEndpoint === 'responses' ? 'chat' : 'responses') ],
+      wantStreaming,
+      prompt,
+      out: streamOutput
+    });
+    renderTable(parseCustomFormat(text));
+  } catch (err) {
+    showErrorBox(err);
     document.getElementById('resultsContainer').innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
   } finally {
-    clearInterval(iv);
-    const s=((performance.now()-t0)/1000).toFixed(2);
-    timer.textContent=`Generado en ${s}s`;
-    btn.disabled=false; btn.textContent='Generar Tabla Comparativa';
+    clearInterval(timer);
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+    timerResult.textContent = `Generado en ${elapsed}s`;
+    generateButton.disabled = false;
+    generateButton.textContent = 'Generar Tabla Comparativa';
   }
 }
 
-/* ========= Orden inteligente + cache fallos y stream ========= */
-async function autoCall({ apiKey, modelSel, endpointSel, wantStreaming, prompt, out }){
-// prioridad nueva: respeta lo que el usuario eligió primero
-const models = Array.from(new Set([ modelSel, 'gpt-4.1', 'gpt-4o' ]));
-const endpoints = Array.from(new Set([ endpointSel, 'responses', 'chat' ]));
+/* ============ Orden inteligente + cache de fallos + probe streaming ============ */
+async function autoCall({ apiKey, models, endpoints, wantStreaming, prompt, out }) {
+  const triedKey = (e, m) => `bad:${e}:${m}`;
 
-  const triedKey = (e,m)=>`bad:${e}:${m}`;
-  for(const e of endpoints){
-    for(const m of models){
-      if(sessionStorage.getItem(triedKey(e,m))==='bad') continue;
+  for (const e of endpoints) {
+    for (const m of models) {
+      if (sessionStorage.getItem(triedKey(e, m)) === 'bad') continue;
 
-      // si pidieron streaming, primero probamos si está habilitado para e+m
+      // Probar streaming una vez por sesión si está habilitado en la UI
       let doStream = wantStreaming;
-      if(doStream){
-        const ok = await probeStreaming({ apiKey, endpoint:e, model:m });
-        if(!ok){ out.textContent += `\n[Streaming no habilitado para ${e}+${m}. Usaremos no-stream]\n`; doStream=false; }
+      if (doStream) {
+        const ok = await probeStreaming({ apiKey, endpoint: e, model: m });
+        if (!ok) { out.textContent += `\n[Streaming no habilitado para ${e}+${m}. Usaremos no-stream]\n`; doStream = false; }
       }
 
-      out.textContent += `\n→ Probando ${e} con ${m}${doStream?' [stream]':''}...\n`;
-      try{
-        const text = await callOnce({ apiKey, endpoint:e, model:m, stream:doStream, prompt, outEl:out });
-        out.textContent += `\n✓ OK con ${e} + ${m}${doStream?' [stream]':''}\n`;
+      out.textContent += `\n→ Probando ${e} con ${m}${doStream ? ' [stream]' : ''}...\n`;
+      try {
+        const text = await callOnce({ apiKey, endpoint: e, model: m, stream: doStream, prompt, outEl: out });
+        out.textContent += `\n✓ OK con ${e} + ${m}${doStream ? ' [stream]' : ''}\n`;
         return text;
-      }catch(err){
-        sessionStorage.setItem(triedKey(e,m),'bad');
-        out.textContent += `✖ Error ${err?.httpStatus||''}. Seguimos probando...\n`;
+      } catch (err) {
+        sessionStorage.setItem(triedKey(e, m), 'bad');
+        out.textContent += `✖ Error ${err?.httpStatus || ''}. Seguimos probando...\n`;
       }
     }
   }
-  throw { error:'No hubo combinación válida. Revisa permisos del modelo o usa gpt-4.1 / gpt-4o.' };
+  throw { error: 'No hubo combinación válida (modelo/endpoint). Revisa permisos del modelo o usa gpt-4.1 / gpt-4o.' };
 }
 
-/* ========= Llamada única ========= */
-async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl }){
-  const headers={ 'Content-Type':'application/json','Authorization':`Bearer ${apiKey}` };
+/* ============ Llamada única (Responses / Chat) ============ */
+async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl }) {
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
 
-  if(endpoint==='responses'){
-    const url='https://api.openai.com/v1/responses';
-    if(stream){
-      const body={ model, input: prompt, stream: true };
-      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
-      if(!res.ok){ let err; try{err=await res.json()}catch{err=await res.text()} throw {httpStatus:res.status,error:err,sent:body}; }
-      let full=''; await readSSE_Responses(res,(d)=>{ full+=d; outEl.textContent+=d; }); return full;
-    }else{
-      const body={ model, input: prompt };
-      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
-      const j=await res.json().catch(()=>({})); if(!res.ok) throw {httpStatus:res.status,error:j,sent:body};
-      const text=(typeof j.output_text==='string')?j.output_text:(Array.isArray(j.output)?j.output.map(m=>(m.content||[]).map(c=>c.text||'').join('')).join(''):''); 
-      return text||'';
+  if (endpoint === 'responses') {
+    const url = 'https://api.openai.com/v1/responses';
+    if (stream) {
+      const body = { model, input: prompt, stream: true };
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      if (!res.ok) { let err; try{ err = await res.json(); } catch{ err = await res.text(); } throw { httpStatus: res.status, error: err, sent: body }; }
+      let full = '';
+      await readSSE_Responses(res, (delta) => { full += delta; outEl.textContent += delta; });
+      return full;
+    } else {
+      const body = { model, input: prompt };
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      const j = await res.json().catch(()=>({}));
+      if (!res.ok) throw { httpStatus: res.status, error: j, sent: body };
+      const text = (typeof j.output_text === 'string')
+        ? j.output_text
+        : (Array.isArray(j.output)
+            ? j.output.map(m => (m.content || []).map(c => c.text || '').join('')).join('')
+            : '');
+      return text || '';
     }
-  }else{ // chat/completions
-    const url='https://api.openai.com/v1/chat/completions';
-    if(stream){
-      const body={ model, messages:[{role:'user',content:prompt}], stream:true };
-      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
-      if(!res.ok){ let err; try{err=await res.json()}catch{err=await res.text()} throw {httpStatus:res.status,error:err,sent:body}; }
-      let full=''; await readSSE_Chat(res,(d)=>{ full+=d; outEl.textContent+=d; }); return full;
-    }else{
-      const body={ model, messages:[{role:'user',content:prompt}] };
-      const res=await fetch(url,{method:'POST',headers,body:JSON.stringify(body)});
-      const j=await res.json().catch(()=>({})); if(!res.ok) throw {httpStatus:res.status,error:j,sent:body};
+  } else { // chat/completions
+    const url = 'https://api.openai.com/v1/chat/completions';
+    if (stream) {
+      const body = { model, messages: [{ role: 'user', content: prompt }], stream: true };
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      if (!res.ok) { let err; try{ err = await res.json(); } catch{ err = await res.text(); } throw { httpStatus: res.status, error: err, sent: body }; }
+      let full = '';
+      await readSSE_Chat(res, (delta) => { full += delta; outEl.textContent += delta; });
+      return full;
+    } else {
+      const body = { model, messages: [{ role: 'user', content: prompt }] };
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      const j = await res.json().catch(()=>({}));
+      if (!res.ok) throw { httpStatus: res.status, error: j, sent: body };
       return j?.choices?.[0]?.message?.content || '';
     }
   }
 }
 
-/* ========= Export ========= */
-function exportToWord(){
-  const t=document.getElementById('resultsTable'); if(!t) return showAlert('No hay resultados para exportar.');
-  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-    body{font-family:'Times New Roman',Times,serif;} table{border-collapse:collapse;width:100%}
-    th,td{border:1px solid #000;padding:8px;vertical-align:top;white-space:pre-wrap} th{background:#f2f2f2}
-    ins{background:#d4edda;color:#000;text-decoration:none} del{background:#f8d7da;color:#000;text-decoration:line-through}
-  </style></head><body><h1>Tabla Comparativa de Indicaciones</h1>${t.outerHTML}</body></html>`;
-  saveAs(htmlDocx.asBlob(html),'Tabla_Comparativa_Indicaciones.docx');
+/* ============ Export a Word ============ */
+function exportToWord() {
+  const table = document.getElementById('resultsTable');
+  if (!table) return showAlert('No hay resultados para exportar.');
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <style>
+      body{font-family:'Times New Roman', Times, serif;}
+      table{border-collapse:collapse;width:100%}
+      th,td{border:1px solid #000;padding:8px;vertical-align:top;white-space:pre-wrap}
+      th{background:#f2f2f2}
+      ins{background:#d4edda;color:#000;text-decoration:none}
+      del{background:#f8d7da;color:#000;text-decoration:line-through}
+    </style></head>
+    <body><h1>Tabla Comparativa de Indicaciones</h1>${table.outerHTML}</body></html>`;
+  saveAs(htmlDocx.asBlob(html), 'Tabla_Comparativa_Indicaciones.docx');
 }
 </script>
-
 </body>
 </html>
