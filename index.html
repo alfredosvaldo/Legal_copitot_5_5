@@ -111,7 +111,7 @@
   </div>
 
   <footer class="text-center p-4 text-gray-500 text-sm">
-    <p>Copiloto Legal v5.7 (Max tokens plan + GPT-5 variants) · Últ. act.: 27 Ago 2025</p>
+    <p>Copiloto Legal v5.8 (MaxTokens + Auto-Continuación) · Últ. act.: 27 Ago 2025</p>
   </footer>
 
   <!-- Modal -->
@@ -140,7 +140,7 @@ modelSelect.addEventListener('change', () => {
   const key = modelSelect.value;
   const preferred = MODEL_PRESETS[key]?.preferredEndpoint;
   if (!endpointUserEdited && preferred) endpointSelect.value = preferred;
-  sessionStorage.clear(); // limpia cache de errores/plataforma por sesión
+  sessionStorage.clear();
 });
 
 /* ============ Persistencia de API key ============ */
@@ -320,16 +320,34 @@ async function probeStreaming({ apiKey, endpoint, model }) {
 
 /* === helper: plan de max tokens por intento (evita truncados en multi-artículo) === */
 function makeMaxTokenPlan(model, endpoint, approxChars) {
-  // Estimación grosera de tokens de entrada (para debug/futuro)
-  const estInTokens = Math.ceil(approxChars / 4);
-  // Plan generoso primero: si la API lo rechaza, bajamos automáticamente.
-  if (endpoint === 'responses') {
-    // Para modelos "mini" el default de salida puede ser bajo → pedimos alto
-    return [8192, 4096, 2048, 1024];
-  } else {
-    // Chat Completions usa max_tokens
-    return [4096, 2048, 1024, 512];
+  if (endpoint === 'responses') return [8192, 4096, 2048, 1024];
+  return [4096, 2048, 1024, 512];
+}
+
+/* === helpers: detectar truncado y preparar continuación === */
+function extractLastBlock(fullText) {
+  const idx = fullText.lastIndexOf('<ARTICLE_START>');
+  if (idx === -1) return '';
+  return fullText.slice(idx);
+}
+function getLastGlobalIndex(block) {
+  let last = 0;
+  const re = /[\n\r]\s*(\d+)\)\s/gm; // numerales "1) 2) 3) ..."
+  let m;
+  while ((m = re.exec(block)) !== null) {
+    const n = parseInt(m[1], 10);
+    if (!isNaN(n) && n > last) last = n;
   }
+  return last;
+}
+function needsContinuation(fullText) {
+  // Si no hay ningún ARTICLE_END o el final no cierra bien, asumimos truncado
+  const starts = (fullText.match(/<ARTICLE_START>/g) || []).length;
+  const ends   = (fullText.match(/<ARTICLE_END>/g)   || []).length;
+  if (starts > ends) return true;
+  // También: si no hay artículos, continuar (puede haber cortado muy pronto)
+  if (starts === 0) return true;
+  return false;
 }
 
 /* ============ Motor de llamadas con fallback (respeta tu elección) ============ */
@@ -338,7 +356,6 @@ async function generateIndications() {
   const modelKey = modelSelect.value;
   const selectedModelId = MODEL_PRESETS[modelKey]?.id || modelKey;
 
-  // endpoint elegido o sugerido por modelo
   const selectedEndpoint = endpointSelect.value || MODEL_PRESETS[modelKey]?.preferredEndpoint || 'responses';
   const wantStreaming = document.getElementById('streamToggle')?.checked ?? true;
 
@@ -443,16 +460,56 @@ Texto Original: ${originalText}
 Texto Final: ${finalText}`;
 
   try {
-    const text = await autoCall({
+    // PRIMER LOTE
+    const firstText = await autoCall({
       apiKey,
-      // prioridad: lo que eligió la persona primero
-      models:    [ selectedModelId, 'gpt-4.1', 'gpt-4o' ],
-      endpoints: [ selectedEndpoint, (selectedEndpoint === 'responses' ? 'chat' : 'responses') ],
+      models:    [ MODEL_PRESETS[modelKey]?.id || modelKey, 'gpt-4.1', 'gpt-4o' ],
+      endpoints: [ endpointSelect.value || 'responses', (endpointSelect.value === 'responses' ? 'chat' : 'responses') ],
       wantStreaming,
       prompt,
-      out: streamOutput
+      out: document.getElementById('streamOutput')
     });
-    renderTable(parseCustomFormat(text));
+
+    let combined = firstText;
+    // Si se detecta truncado, pedimos continuaciones por lotes (máx 4)
+    let steps = 0;
+    const MAX_CONT_STEPS = 4;
+    while (needsContinuation(combined) && steps < MAX_CONT_STEPS) {
+      steps++;
+      const lastBlock = extractLastBlock(combined);
+      const lastIdx = getLastGlobalIndex(lastBlock);
+      const contHeader = `\n\n[Continuación automática ${steps}/${MAX_CONT_STEPS}] Último índice global detectado: ${lastIdx}).\n`;
+      document.getElementById('streamOutput').textContent += contHeader;
+
+      const continuePrompt = `CONTINUACIÓN ESTRICTA — LOTE ${steps}
+Debes CONTINUAR la salida exactamente donde quedó, sin repetir bloques ya emitidos.
+Devuelve EXCLUSIVAMENTE nuevos bloques <ARTICLE_START> ... </ARTICLE_END>.
+Mantén la numeración correlativa global continuando desde ${lastIdx + 1}).
+No reinicies ni reformatees nada.
+
+Referencia del último bloque emitido (para contexto de numeración y estilo):
+${lastBlock.slice(0, 2000)}
+
+Recuerda: Solo devuelve los NUEVOS bloques <ARTICLE_START> ... </ARTICLE_END>, en el mismo formato exacto, hasta seguir avanzando en los textos.`;
+
+      const contText = await autoCall({
+        apiKey,
+        models:    [ MODEL_PRESETS[modelKey]?.id || modelKey, 'gpt-4.1', 'gpt-4o' ],
+        endpoints: [ endpointSelect.value || 'responses', (endpointSelect.value === 'responses' ? 'chat' : 'responses') ],
+        wantStreaming,
+        prompt: `${prompt}\n\n${continuePrompt}`,
+        out: document.getElementById('streamOutput')
+      });
+
+      // si no llega nada útil, rompemos el ciclo
+      if (!contText || !contText.includes('<ARTICLE_START>')) break;
+
+      // evita duplicados triviales: si cont repite el último bloque, recórtalo
+      const newPart = contText.replace(lastBlock, '');
+      combined += newPart;
+    }
+
+    renderTable(parseCustomFormat(combined));
   } catch (err) {
     showErrorBox(err);
     document.getElementById('resultsContainer').innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
@@ -474,14 +531,12 @@ async function autoCall({ apiKey, models, endpoints, wantStreaming, prompt, out 
     for (const m of models) {
       if (sessionStorage.getItem(triedKey(e, m)) === 'bad') continue;
 
-      // Probar streaming una vez por sesión si está habilitado en la UI
       let doStream = wantStreaming;
       if (doStream) {
         const ok = await probeStreaming({ apiKey, endpoint: e, model: m });
         if (!ok) { out.textContent += `\n[Streaming no habilitado para ${e}+${m}. Usaremos no-stream]\n`; doStream = false; }
       }
 
-      // Plan de max tokens (evita truncados en mini/multiartículo)
       const maxPlan = makeMaxTokenPlan(m, e, approxChars);
 
       out.textContent += `\n→ Probando ${e} con ${m}${doStream ? ' [stream]' : ''}...\n`;
@@ -546,7 +601,6 @@ async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl, maxPla
           return text || '';
         }
       } else {
-        // chat/completions
         const url = 'https://api.openai.com/v1/chat/completions';
         if (stream) {
           const body = { model, messages: [{ role: 'user', content: prompt }], stream: true, max_tokens: limit };
