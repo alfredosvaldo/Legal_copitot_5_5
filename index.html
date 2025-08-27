@@ -62,8 +62,7 @@
               <option value="responses" selected>v1/responses (recomendado)</option>
               <option value="chat">v1/chat/completions</option>
             </select>
-            <p class="text-xs text-gray-500 mt-1">Sugerido automáticamente por modelo (puedes cambiarlo).</p> 
-
+            <p class="text-xs text-gray-500 mt-1">Sugerido automáticamente por modelo (puedes cambiarlo).</p>
           </div>
           <div class="flex items-center gap-2">
             <input type="checkbox" id="streamToggle" checked />
@@ -112,7 +111,7 @@
   </div>
 
   <footer class="text-center p-4 text-gray-500 text-sm">
-    <p>Copiloto Legal v5.6.1 (GPT-5 options + auto endpoint) · Últ. act.: 27 Ago 2025</p>
+    <p>Copiloto Legal v5.7 (Max tokens plan + GPT-5 variants) · Últ. act.: 27 Ago 2025</p>
   </footer>
 
   <!-- Modal -->
@@ -319,6 +318,20 @@ async function probeStreaming({ apiKey, endpoint, model }) {
   }
 }
 
+/* === helper: plan de max tokens por intento (evita truncados en multi-artículo) === */
+function makeMaxTokenPlan(model, endpoint, approxChars) {
+  // Estimación grosera de tokens de entrada (para debug/futuro)
+  const estInTokens = Math.ceil(approxChars / 4);
+  // Plan generoso primero: si la API lo rechaza, bajamos automáticamente.
+  if (endpoint === 'responses') {
+    // Para modelos "mini" el default de salida puede ser bajo → pedimos alto
+    return [8192, 4096, 2048, 1024];
+  } else {
+    // Chat Completions usa max_tokens
+    return [4096, 2048, 1024, 512];
+  }
+}
+
 /* ============ Motor de llamadas con fallback (respeta tu elección) ============ */
 async function generateIndications() {
   const apiKey = apiKeyInput.value;
@@ -455,6 +468,7 @@ Texto Final: ${finalText}`;
 /* ============ Orden inteligente + cache de fallos + probe streaming ============ */
 async function autoCall({ apiKey, models, endpoints, wantStreaming, prompt, out }) {
   const triedKey = (e, m) => `bad:${e}:${m}`;
+  const approxChars = prompt.length;
 
   for (const e of endpoints) {
     for (const m of models) {
@@ -467,9 +481,15 @@ async function autoCall({ apiKey, models, endpoints, wantStreaming, prompt, out 
         if (!ok) { out.textContent += `\n[Streaming no habilitado para ${e}+${m}. Usaremos no-stream]\n`; doStream = false; }
       }
 
+      // Plan de max tokens (evita truncados en mini/multiartículo)
+      const maxPlan = makeMaxTokenPlan(m, e, approxChars);
+
       out.textContent += `\n→ Probando ${e} con ${m}${doStream ? ' [stream]' : ''}...\n`;
       try {
-        const text = await callOnce({ apiKey, endpoint: e, model: m, stream: doStream, prompt, outEl: out });
+        const text = await callOnce({
+          apiKey, endpoint: e, model: m, stream: doStream,
+          prompt, outEl: out, maxPlan
+        });
         out.textContent += `\n✓ OK con ${e} + ${m}${doStream ? ' [stream]' : ''}\n`;
         return text;
       } catch (err) {
@@ -481,48 +501,85 @@ async function autoCall({ apiKey, models, endpoints, wantStreaming, prompt, out 
   throw { error: 'No hubo combinación válida (modelo/endpoint). Revisa permisos del modelo o usa gpt-4.1 / gpt-4o.' };
 }
 
-/* ============ Llamada única (Responses / Chat) ============ */
-async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl }) {
+/* ============ Llamada única (Responses / Chat) con plan de max tokens ============ */
+async function callOnce({ apiKey, endpoint, model, stream, prompt, outEl, maxPlan }) {
   const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+  const plan = Array.isArray(maxPlan) && maxPlan.length ? maxPlan.slice()
+               : (endpoint === 'responses' ? [8192, 4096, 2048, 1024] : [4096, 2048, 1024, 512]);
 
-  if (endpoint === 'responses') {
-    const url = 'https://api.openai.com/v1/responses';
-    if (stream) {
-      const body = { model, input: prompt, stream: true };
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-      if (!res.ok) { let err; try{ err = await res.json(); } catch{ err = await res.text(); } throw { httpStatus: res.status, error: err, sent: body }; }
-      let full = '';
-      await readSSE_Responses(res, (delta) => { full += delta; outEl.textContent += delta; });
-      return full;
-    } else {
-      const body = { model, input: prompt };
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-      const j = await res.json().catch(()=>({}));
-      if (!res.ok) throw { httpStatus: res.status, error: j, sent: body };
-      const text = (typeof j.output_text === 'string')
-        ? j.output_text
-        : (Array.isArray(j.output)
-            ? j.output.map(m => (m.content || []).map(c => c.text || '').join('')).join('')
-            : '');
-      return text || '';
-    }
-  } else { // chat/completions
-    const url = 'https://api.openai.com/v1/chat/completions';
-    if (stream) {
-      const body = { model, messages: [{ role: 'user', content: prompt }], stream: true };
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-      if (!res.ok) { let err; try{ err = await res.json(); } catch{ err = await res.text(); } throw { httpStatus: res.status, error: err, sent: body }; }
-      let full = '';
-      await readSSE_Chat(res, (delta) => { full += delta; outEl.textContent += delta; });
-      return full;
-    } else {
-      const body = { model, messages: [{ role: 'user', content: prompt }] };
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-      const j = await res.json().catch(()=>({}));
-      if (!res.ok) throw { httpStatus: res.status, error: j, sent: body };
-      return j?.choices?.[0]?.message?.content || '';
+  let lastErr = null;
+
+  for (const limit of plan) {
+    try {
+      outEl.textContent += `   ↳ max_${endpoint === 'responses' ? 'output_' : ''}tokens=${limit}\n`;
+
+      if (endpoint === 'responses') {
+        const url = 'https://api.openai.com/v1/responses';
+        if (stream) {
+          const body = { model, input: prompt, stream: true, max_output_tokens: limit };
+          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          if (!res.ok) {
+            let err; try { err = await res.json(); } catch { err = await res.text(); }
+            if (err?.error?.param === 'max_output_tokens' || /max_output_tokens/i.test(JSON.stringify(err))) {
+              lastErr = { httpStatus: res.status, error: err, sent: body }; continue;
+            }
+            throw { httpStatus: res.status, error: err, sent: body };
+          }
+          let full = '';
+          await readSSE_Responses(res, (delta) => { full += delta; outEl.textContent += delta; });
+          return full;
+        } else {
+          const body = { model, input: prompt, max_output_tokens: limit };
+          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          const j = await res.json().catch(()=>({}));
+          if (!res.ok) {
+            if (j?.error?.param === 'max_output_tokens' || /max_output_tokens/i.test(JSON.stringify(j))) {
+              lastErr = { httpStatus: res.status, error: j, sent: body }; continue;
+            }
+            throw { httpStatus: res.status, error: j, sent: body };
+          }
+          const text = (typeof j.output_text === 'string')
+            ? j.output_text
+            : (Array.isArray(j.output)
+                ? j.output.map(m => (m.content || []).map(c => c.text || '').join('')).join('')
+                : '');
+          return text || '';
+        }
+      } else {
+        // chat/completions
+        const url = 'https://api.openai.com/v1/chat/completions';
+        if (stream) {
+          const body = { model, messages: [{ role: 'user', content: prompt }], stream: true, max_tokens: limit };
+          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          if (!res.ok) {
+            let err; try { err = await res.json(); } catch { err = await res.text(); }
+            if (err?.error?.param === 'max_tokens' || /max_tokens/i.test(JSON.stringify(err))) {
+              lastErr = { httpStatus: res.status, error: err, sent: body }; continue;
+            }
+            throw { httpStatus: res.status, error: err, sent: body };
+          }
+          let full = '';
+          await readSSE_Chat(res, (delta) => { full += delta; outEl.textContent += delta; });
+          return full;
+        } else {
+          const body = { model, messages: [{ role: 'user', content: prompt }], max_tokens: limit };
+          const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          const j = await res.json().catch(()=>({}));
+          if (!res.ok) {
+            if (j?.error?.param === 'max_tokens' || /max_tokens/i.test(JSON.stringify(j))) {
+              lastErr = { httpStatus: res.status, error: j, sent: body }; continue;
+            }
+            throw { httpStatus: res.status, error: j, sent: body };
+          }
+          return j?.choices?.[0]?.message?.content || '';
+        }
+      }
+    } catch (e) {
+      if (e?.error?.param !== 'max_output_tokens' && e?.error?.param !== 'max_tokens') throw e;
+      lastErr = e;
     }
   }
+  throw (lastErr || { error: 'Token plan exhausted' });
 }
 
 /* ============ Export a Word ============ */
