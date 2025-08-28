@@ -51,8 +51,8 @@
             <select id="modelSelect" class="w-full mt-1 p-2 border rounded-md">
               <option value="gpt-5">gpt-5 (standard)</option>
               <option value="gpt-5-reasoning">gpt-5 (reasoning)</option>
-              <option value="gpt-5-mini">gpt-5-mini (rápido)</option>
-              <option value="gpt-4.1" selected >gpt-4.1</option>
+              <option value="gpt-5-mini" selected>gpt-5-mini (rápido)</option>
+              <option value="gpt-4.1">gpt-4.1</option>
               <option value="gpt-4o">gpt-4o</option>
             </select>
           </div>
@@ -341,13 +341,30 @@ function getLastGlobalIndex(block) {
   return last;
 }
 function needsContinuation(fullText) {
-  // Si no hay ningún ARTICLE_END o el final no cierra bien, asumimos truncado
   const starts = (fullText.match(/<ARTICLE_START>/g) || []).length;
   const ends   = (fullText.match(/<ARTICLE_END>/g)   || []).length;
   if (starts > ends) return true;
-  // También: si no hay artículos, continuar (puede haber cortado muy pronto)
   if (starts === 0) return true;
   return false;
+}
+
+/* === Reparación suave de unidad (inciso vs oración) === */
+function softUnitRepair(rawText) {
+  const lines = rawText.split('\n');
+  const reNuevoInciso = /(nuevo\s+inciso|como\s+inciso)/i;
+  const reOracionFrase = /(la\s+oración|la\s+frase|la\s+expresión|la\s+palabra)/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (reNuevoInciso.test(L) && reOracionFrase.test(L)) {
+      lines[i] = L
+        .replace(/nuevo\s+inciso/gi, 'la oración')
+        .replace(/como\s+inciso/gi, 'la oración')
+        .replace(/Para\s+agregar/gi, 'Para incorporar')
+        .replace(/Para\s+introducir/gi, 'Para incorporar');
+    }
+  }
+  return lines.join('\n');
 }
 
 /* ============ Motor de llamadas con fallback (respeta tu elección) ============ */
@@ -387,7 +404,7 @@ async function generateIndications() {
     timerResult.textContent = `Generando… ${sec}s`;
   }, 250);
 
-  // PROMPT ÍNTEGRO (sin resumir)
+  // PROMPT
   const prompt = `Rol: Eres un asesor legislativo experto en Chile, con especialización en técnica parlamentaria. Tu misión es generar una comparación completa, artículo por artículo, de dos textos legales, produciendo indicaciones precisas y profesionales que se adhieran estrictamente a la terminología oficial.
 
 1) GLOSARIO DE TÉRMINOS (USO OBLIGATORIO)
@@ -407,6 +424,19 @@ async function generateIndications() {
 - Agrupación de cambios:
 • Genera UNA indicación por unidad afectada (inciso, numeral, literal, sección, encabezado, “nuevo inciso [ordinal] introducido al artículo X”, etc.).
 • Si varios cambios coherentes afectan una MISMA unidad (o varias partes del mismo artículo bajo un objetivo común), puedes agruparlos en UNA sola indicación usando la frase: "en el siguiente sentido:" y desglosando con a), b), c)… (usando verbos normativos).
+
+2.b) REGLAS FINAS DE UNIDAD (OBLIGATORIAS)
+Nunca confundas oración/frase/expresión/palabra/guarismo con inciso/numeral/literal.
+Decisión:
+- Si el mandato usa “la oración”, “la frase”, “la expresión”, “la palabra” ⇒ NO es un nuevo inciso. Es inserción o sustitución dentro del mismo inciso.
+- Usa:
+  • Para agregar: “Incorpórase, a continuación de «___», la **oración** «___».”
+  • Para intercalar: “Intercálese, entre «___» y «___», la **oración** «___».”
+  • Para reemplazar: “Sustitúyese la **expresión** «___» por «___».”
+- Solo llamar “nuevo inciso” cuando el texto nombre expresamente “inciso primero/segundo/tercero…”, “inciso nuevo”, o sea un párrafo independiente identificable como inciso.
+- Prohibido redactar “nuevo inciso” si el texto dice “la oración”, “la frase” o similares.
+- Si dudas, prefiere “oración/frase” y no “nuevo inciso”.
+Validación interna: si una indicación contiene “nuevo inciso” y también “oración/frase/expresión/palabra/guarismo”, corrige a inserción/intercalación/sustitución.
 
 3) FORMATO DE SALIDA ESTRICTO (OBLIGATORIO)
 Toda la respuesta debe usar estas etiquetas (no uses JSON).
@@ -463,14 +493,15 @@ Texto Final: ${finalText}`;
     // PRIMER LOTE
     const firstText = await autoCall({
       apiKey,
-      models:    [ MODEL_PRESETS[modelKey]?.id || modelKey, 'gpt-4.1', 'gpt-4o' ],
-      endpoints: [ endpointSelect.value || 'responses', (endpointSelect.value === 'responses' ? 'chat' : 'responses') ],
+      models:    [ selectedModelId, 'gpt-4.1', 'gpt-4o' ],
+      endpoints: [ selectedEndpoint, (selectedEndpoint === 'responses' ? 'chat' : 'responses') ],
       wantStreaming,
       prompt,
       out: document.getElementById('streamOutput')
     });
 
     let combined = firstText;
+
     // Si se detecta truncado, pedimos continuaciones por lotes (máx 4)
     let steps = 0;
     const MAX_CONT_STEPS = 4;
@@ -478,7 +509,7 @@ Texto Final: ${finalText}`;
       steps++;
       const lastBlock = extractLastBlock(combined);
       const lastIdx = getLastGlobalIndex(lastBlock);
-      const contHeader = `\n\n[Continuación automática ${steps}/${MAX_CONT_STEPS}] Último índice global detectado: ${lastIdx}).\n`;
+      const contHeader = `\n\n[Continuación automática ${steps}/${MAX_CONT_STEPS}] Último índice global detectado: ${lastIdx}.\n`;
       document.getElementById('streamOutput').textContent += contHeader;
 
       const continuePrompt = `CONTINUACIÓN ESTRICTA — LOTE ${steps}
@@ -494,25 +525,28 @@ Recuerda: Solo devuelve los NUEVOS bloques <ARTICLE_START> ... </ARTICLE_END>, e
 
       const contText = await autoCall({
         apiKey,
-        models:    [ MODEL_PRESETS[modelKey]?.id || modelKey, 'gpt-4.1', 'gpt-4o' ],
-        endpoints: [ endpointSelect.value || 'responses', (endpointSelect.value === 'responses' ? 'chat' : 'responses') ],
+        models:    [ selectedModelId, 'gpt-4.1', 'gpt-4o' ],
+        endpoints: [ selectedEndpoint, (selectedEndpoint === 'responses' ? 'chat' : 'responses') ],
         wantStreaming,
         prompt: `${prompt}\n\n${continuePrompt}`,
         out: document.getElementById('streamOutput')
       });
 
-      // si no llega nada útil, rompemos el ciclo
       if (!contText || !contText.includes('<ARTICLE_START>')) break;
 
-      // evita duplicados triviales: si cont repite el último bloque, recórtalo
       const newPart = contText.replace(lastBlock, '');
       combined += newPart;
     }
 
-    renderTable(parseCustomFormat(combined));
+    // Reparación suave por si mini confundió "nuevo inciso" con "oración"
+    const repaired = softUnitRepair(combined);
+    renderTable(parseCustomFormat(repaired));
+
   } catch (err) {
+    console.error(err);
     showErrorBox(err);
-    document.getElementById('resultsContainer').innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
+    const rc = document.getElementById('resultsContainer');
+    if (rc) rc.innerHTML = '<p class="text-red-500">No se pudieron procesar artículos.</p>';
   } finally {
     clearInterval(timer);
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
@@ -652,6 +686,16 @@ function exportToWord() {
     <body><h1>Tabla Comparativa de Indicaciones</h1>${table.outerHTML}</body></html>`;
   saveAs(htmlDocx.asBlob(html), 'Tabla_Comparativa_Indicaciones.docx');
 }
+
+/* ============ Handlers globales de errores (para depurar rápido) ============ */
+window.addEventListener('error', (ev) => {
+  console.error('window.error:', ev.error || ev.message);
+  if (typeof showErrorBox === 'function') showErrorBox(ev.error || ev.message);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  console.error('unhandledrejection:', ev.reason);
+  if (typeof showErrorBox === 'function') showErrorBox(ev.reason);
+});
 </script>
 </body>
 </html>
